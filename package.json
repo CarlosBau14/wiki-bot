@@ -1,0 +1,22 @@
+{
+  "name": "wiki-bot",
+  "version": "1.0.0",
+  "description": "Slack bot con Notion como base de conocimiento y Claude como IA",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.3",
+    "@notionhq/client": "^2.2.15",
+    "@slack/bolt": "^3.22.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.7.3"
+  }
+}
