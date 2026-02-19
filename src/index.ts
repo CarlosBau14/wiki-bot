@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import { App } from '@slack/bolt';
+import { App, ExpressReceiver } from '@slack/bolt';
+import express, { Request, Response, NextFunction, Router } from 'express';
 import { searchNotion } from './notion.service';
 import { generateAnswer } from './claude.service';
 
@@ -17,17 +18,79 @@ for (const key of required) {
   }
 }
 
+// ─────────────────────────────────────────────
+// Lee el body del stream y lo almacena como req.rawBody.
+// Bolt comprueba req.rawBody antes de leer el stream, por lo que
+// usará este buffer en lugar de intentar releer el stream consumido.
+// ─────────────────────────────────────────────
+function readRawBody(req: Request): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+// ─────────────────────────────────────────────
+// Router propio que se pasa a ExpressReceiver.
+// Al registrarlo ANTES de que Bolt añada su middleware,
+// este handler corre ANTES de la verificación de firma.
+// ─────────────────────────────────────────────
+const router = Router();
+
+router.post(
+  '/slack/events',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const rawBody = await readRawBody(req);
+      // Guardamos el buffer para que Bolt lo use sin releer el stream
+      (req as any).rawBody = rawBody;
+      const body = JSON.parse(rawBody.toString());
+      if (body.type === 'url_verification') {
+        res.json({ challenge: body.challenge });
+        return;
+      }
+    } catch {
+      // Body no es JSON válido — Bolt lo rechazará con 400
+    }
+    next();
+  }
+);
+
+// ─────────────────────────────────────────────
+// Receiver de Bolt con nuestro router pre-configurado.
+// Bolt añade su stack (firma + handlers) DESPUÉS de nuestros handlers.
+// ─────────────────────────────────────────────
+const receiver = new ExpressReceiver({
+  signingSecret: process.env.SLACK_SIGNING_SECRET!,
+  router,
+});
+
+// ─────────────────────────────────────────────
+// Handler en "/" para el challenge de Slack.
+// Bolt no registra nada en "/", así que no hay conflictos.
+// ─────────────────────────────────────────────
+receiver.app.post('/', express.json(), (req: Request, res: Response) => {
+  if (req.body?.type === 'url_verification') {
+    res.json({ challenge: req.body.challenge });
+    return;
+  }
+  res.status(200).send('OK');
+});
+
+// ─────────────────────────────────────────────
+// App de Bolt
+// ─────────────────────────────────────────────
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET!,
-  port: Number(process.env.PORT) || 3000,
+  receiver,
 });
 
 // ─────────────────────────────────────────────
 // Mención al bot: @WikiBot ¿cuál es la política de vacaciones?
 // ─────────────────────────────────────────────
 app.event('app_mention', async ({ event, client, say }) => {
-  // Limpiar la mención del bot del texto
   const query = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
 
   if (!query) {
@@ -38,7 +101,6 @@ app.event('app_mention', async ({ event, client, say }) => {
     return;
   }
 
-  // Reacción "pensando..." mientras procesamos
   await client.reactions
     .add({ channel: event.channel, timestamp: event.ts, name: 'thinking_face' })
     .catch(() => {});
@@ -49,7 +111,6 @@ app.event('app_mention', async ({ event, client, say }) => {
     const notionPages = await searchNotion(query);
     const answer = await generateAnswer(query, notionPages);
 
-    // Responder en el mismo hilo
     const threadTs = 'thread_ts' in event ? event.thread_ts : event.ts;
     await say({
       text: answer,
@@ -72,7 +133,6 @@ app.event('app_mention', async ({ event, client, say }) => {
 // Slash command: /wiki ¿cuál es la política de vacaciones?
 // ─────────────────────────────────────────────
 app.command('/wiki', async ({ command, ack, respond, client }) => {
-  // Hay que hacer ack() en menos de 3 segundos
   await ack();
 
   const query = command.text.trim();
@@ -91,7 +151,6 @@ app.command('/wiki', async ({ command, ack, respond, client }) => {
     const notionPages = await searchNotion(query);
     const answer = await generateAnswer(query, notionPages);
 
-    // Publicar la respuesta en el canal (visible para todos)
     await client.chat.postMessage({
       channel: command.channel_id,
       text: `*<@${command.user_id}> preguntó:* ${query}\n\n${answer}`,
@@ -110,9 +169,9 @@ app.command('/wiki', async ({ command, ack, respond, client }) => {
 // Arrancar
 // ─────────────────────────────────────────────
 (async () => {
-  await app.start();
+  await app.start(Number(process.env.PORT) || 3000);
   const port = process.env.PORT || 3000;
   console.log(`\n⚡ Wiki Bot iniciado en el puerto ${port}`);
-  console.log(`   URL para Slack Events API: http://tu-dominio:${port}/slack/events`);
+  console.log(`   Endpoints del challenge: POST / y POST /slack/events`);
   console.log(`   Slash command configurado: /wiki`);
 })();
